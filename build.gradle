@@ -285,9 +285,9 @@ project(':iceberg-data') {
 project(':iceberg-aliyun') {
   dependencies {
     implementation project(path: ':iceberg-bundled-guava', configuration: 'shadow')
-    compile project(':iceberg-api')
+    api project(':iceberg-api')
     implementation project(':iceberg-common')
-    compile project(':iceberg-core')
+    implementation project(':iceberg-core')
 
     compileOnly 'com.aliyun.oss:aliyun-sdk-oss'
 
@@ -817,6 +817,7 @@ project(':iceberg-hive-runtime') {
       exclude group: 'com.google.code.findbugs', module: 'jsr305'
     }
     implementation project(':iceberg-aws')
+    implementation project(':iceberg-aliyun')
   }
 
   shadowJar {
