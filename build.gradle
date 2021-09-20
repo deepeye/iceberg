@@ -470,16 +470,10 @@ project(':iceberg-flink-runtime') {
   }
 
   dependencies {
-<<<<<<< HEAD
     implementation project(':iceberg-flink')
     implementation project(':iceberg-aws')
+    implementation project(':iceberg-aliyun')
     implementation(project(':iceberg-nessie')) {
-=======
-    compile project(':iceberg-flink')
-    compile project(':iceberg-aws')
-    compile project(':iceberg-aliyun')
-    compile(project(':iceberg-nessie')) {
->>>>>>> pr/1
       exclude group: 'com.google.code.findbugs', module: 'jsr305'
     }
   }
@@ -1082,17 +1076,10 @@ if (jdkVersion == '8') {
     }
 
     dependencies {
-<<<<<<< HEAD
       implementation project(':iceberg-spark2')
       implementation project(':iceberg-aws')
+      implementation project(':iceberg-aliyun')
       implementation(project(':iceberg-nessie')) {
-=======
-      compile project(':iceberg-spark2')
-      compile project(':iceberg-aws')
-      compile project(':iceberg-aliyun')
-      compile 'org.apache.spark:spark-hive_2.11'
-      compile(project(':iceberg-nessie')) {
->>>>>>> pr/1
         exclude group: 'com.google.code.findbugs', module: 'jsr305'
       }
     }
@@ -1336,20 +1323,12 @@ project(':iceberg-spark3-runtime') {
   }
 
   dependencies {
-<<<<<<< HEAD
     api project(':iceberg-api')
     implementation project(':iceberg-spark3')
     implementation project(':iceberg-spark3-extensions')
     implementation project(':iceberg-aws')
+    implementation project(':iceberg-aliyun')
     implementation(project(':iceberg-nessie')) {
-=======
-    compile project(':iceberg-spark3')
-    compile project(':iceberg-spark3-extensions')
-    compile project(':iceberg-aws')
-    compile project(':iceberg-aliyun')
-    compile 'org.apache.spark:spark-hive_2.11'
-    compile(project(':iceberg-nessie')) {
->>>>>>> pr/1
       exclude group: 'com.google.code.findbugs', module: 'jsr305'
     }
 
