@@ -284,7 +284,9 @@ project(':iceberg-data') {
 
 project(':iceberg-aliyun') {
   dependencies {
+    implementation project(path: ':iceberg-bundled-guava', configuration: 'shadow')
     compile project(':iceberg-api')
+    implementation project(':iceberg-common')
     compile project(':iceberg-core')
 
     compileOnly 'com.aliyun.oss:aliyun-sdk-oss'
