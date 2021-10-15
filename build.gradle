@@ -308,6 +308,7 @@ project(':iceberg-aliyun') {
       exclude module: 'logback-classic'
       exclude module: 'spring-boot-starter-logging'
     }
+    testImplementation project(path: ':iceberg-api', configuration: 'testArtifacts')
   }
 }
 
