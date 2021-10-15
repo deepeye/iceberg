@@ -73,3 +73,4 @@ if (JavaVersion.current() == JavaVersion.VERSION_1_8) {
   project(':hive3').name = 'iceberg-hive3'
   project(':hive3-orc-bundle').name = 'iceberg-hive3-orc-bundle'
 }
+
