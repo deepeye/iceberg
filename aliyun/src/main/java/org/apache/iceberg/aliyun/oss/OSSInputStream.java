@@ -31,7 +31,7 @@ import org.apache.iceberg.relocated.com.google.common.io.ByteStreams;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-class OSSInputStream extends SeekableInputStream {
+public class OSSInputStream extends SeekableInputStream {
   private static final Logger LOG = LoggerFactory.getLogger(OSSInputStream.class);
   private static final int SKIP_SIZE = 1024 * 1024;
 
@@ -44,10 +44,9 @@ class OSSInputStream extends SeekableInputStream {
   private long next = 0;
   private boolean closed = false;
 
-  OSSInputStream(OSS client, OSSURI uri) {
+  public OSSInputStream(OSS client, OSSURI uri) {
     this.client = client;
     this.uri = uri;
-
     this.createStack = Thread.currentThread().getStackTrace();
   }
 
@@ -58,8 +57,8 @@ class OSSInputStream extends SeekableInputStream {
 
   @Override
   public void seek(long newPos) {
-    Preconditions.checkState(!closed, "already closed");
-    Preconditions.checkArgument(newPos >= 0, "position is negative: %s", newPos);
+    Preconditions.checkState(!closed, "Cannot seek: already closed");
+    Preconditions.checkArgument(newPos >= 0, "Position is negative: %s", newPos);
 
     // this allows a seek beyond the end of the stream but the next read will fail
     next = newPos;
@@ -90,9 +89,13 @@ class OSSInputStream extends SeekableInputStream {
 
   @Override
   public void close() throws IOException {
+    if (closed) {
+      return;
+    }
+
     super.close();
-    closed = true;
     closeStream();
+    closed = true;
   }
 
   private void positionStream() throws IOException {
@@ -106,7 +109,7 @@ class OSSInputStream extends SeekableInputStream {
       long skip = next - pos;
       if (skip <= Math.max(stream.available(), SKIP_SIZE)) {
         // already buffered or seek is small enough
-        LOG.debug("Read-through seek for {} to offset {}", uri, next);
+        LOG.debug("Read-through seek for {} from {} to offset {}", uri, pos, next);
         try {
           ByteStreams.skipFully(stream, skip);
           pos = next;
@@ -126,8 +129,7 @@ class OSSInputStream extends SeekableInputStream {
   private void openStream() throws IOException {
     closeStream();
 
-    GetObjectRequest request = new GetObjectRequest(uri.bucket(), uri.key())
-        .withRange(pos, -1);
+    GetObjectRequest request = new GetObjectRequest(uri.bucket(), uri.key()).withRange(pos, -1);
     stream = client.getObject(request).getObjectContent();
   }
 
@@ -143,7 +145,7 @@ class OSSInputStream extends SeekableInputStream {
   protected void finalize() throws Throwable {
     super.finalize();
     if (!closed) {
-      close();
+      close(); // releasing resources is more important than printing the warning
       String trace = Joiner.on("\n\t").join(Arrays.copyOfRange(createStack, 1, createStack.length));
       LOG.warn("Unclosed input stream created by: \n\t{}", trace);
     }

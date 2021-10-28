@@ -23,6 +23,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Random;
+import java.util.concurrent.ThreadLocalRandom;
 import org.apache.commons.io.IOUtils;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.junit.Test;
@@ -31,9 +32,8 @@ import static org.apache.iceberg.AssertHelpers.assertThrows;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 
-public class TestOSSInputStream extends OSSTestBase {
-
-  private final Random random = new Random(1);
+public class TestOSSInputStream extends AliyunOSSTestBase {
+  private final Random random = ThreadLocalRandom.current();
 
   @Test
   public void testRead() throws Exception {
@@ -43,7 +43,7 @@ public class TestOSSInputStream extends OSSTestBase {
 
     writeOSSData(uri, data);
 
-    try (SeekableInputStream in = new OSSInputStream(oss().get(), uri)) {
+    try (SeekableInputStream in = new OSSInputStream(ossClient().get(), uri)) {
       int readSize = 1024;
 
       readAndCheck(in, in.getPos(), readSize, data, false);
@@ -72,7 +72,7 @@ public class TestOSSInputStream extends OSSTestBase {
   private void readAndCheck(SeekableInputStream in, long rangeStart, int size, byte[] original, boolean buffered)
       throws IOException {
     in.seek(rangeStart);
-    assertEquals(rangeStart, in.getPos());
+    assertEquals("Should have the correct position", rangeStart, in.getPos());
 
     long rangeEnd = rangeStart + size;
     byte[] actual = new byte[size];
@@ -86,19 +86,23 @@ public class TestOSSInputStream extends OSSTestBase {
       }
     }
 
-    assertEquals(rangeEnd, in.getPos());
-    assertArrayEquals(Arrays.copyOfRange(original, (int) rangeStart, (int) rangeEnd), actual);
+    assertEquals("Should have the correct position", rangeEnd, in.getPos());
+
+    assertArrayEquals("Should have expected range data",
+        Arrays.copyOfRange(original, (int) rangeStart, (int) rangeEnd), actual);
   }
 
   @Test
   public void testClose() throws Exception {
     OSSURI uri = new OSSURI(location("closed.dat"));
-    SeekableInputStream closed = new OSSInputStream(oss().get(), uri);
+    SeekableInputStream closed = new OSSInputStream(ossClient().get(), uri);
     closed.close();
-    assertThrows("Cannot seek the input stream after closed.", IllegalStateException.class, () -> {
-      closed.seek(0);
-      return null;
-    });
+    assertThrows("Cannot seek the input stream after closed.", IllegalStateException.class,
+        "Cannot seek: already closed",
+        () -> {
+          closed.seek(0);
+          return null;
+        });
   }
 
   @Test
@@ -108,12 +112,12 @@ public class TestOSSInputStream extends OSSTestBase {
 
     writeOSSData(uri, expected);
 
-    try (SeekableInputStream in = new OSSInputStream(oss().get(), uri)) {
+    try (SeekableInputStream in = new OSSInputStream(ossClient().get(), uri)) {
       in.seek(expected.length / 2);
-
       byte[] actual = new byte[expected.length / 2];
       IOUtils.readFully(in, actual);
-      assertArrayEquals(Arrays.copyOfRange(expected, expected.length / 2, expected.length), actual);
+      assertArrayEquals("Should have expected seeking stream",
+          Arrays.copyOfRange(expected, expected.length / 2, expected.length), actual);
     }
   }
 
@@ -124,6 +128,6 @@ public class TestOSSInputStream extends OSSTestBase {
   }
 
   private void writeOSSData(OSSURI uri, byte[] data) {
-    oss().get().putObject(uri.bucket(), uri.key(), new ByteArrayInputStream(data));
+    ossClient().get().putObject(uri.bucket(), uri.key(), new ByteArrayInputStream(data));
   }
 }
