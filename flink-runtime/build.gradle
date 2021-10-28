@@ -39,6 +39,7 @@ project(':iceberg-flink-runtime') {
   dependencies {
     implementation project(':iceberg-flink')
     implementation project(':iceberg-aws')
+    implementation project(':iceberg-aliyun')
     implementation(project(':iceberg-nessie')) {
       exclude group: 'com.google.code.findbugs', module: 'jsr305'
     }
