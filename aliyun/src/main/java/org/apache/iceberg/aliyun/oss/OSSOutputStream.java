@@ -20,70 +20,102 @@
 package org.apache.iceberg.aliyun.oss;
 
 import com.aliyun.oss.OSS;
+import com.aliyun.oss.model.AbortMultipartUploadRequest;
+import com.aliyun.oss.model.CompleteMultipartUploadRequest;
+import com.aliyun.oss.model.InitiateMultipartUploadRequest;
+import com.aliyun.oss.model.InitiateMultipartUploadResult;
 import com.aliyun.oss.model.ObjectMetadata;
+import com.aliyun.oss.model.PartETag;
 import com.aliyun.oss.model.PutObjectRequest;
+import com.aliyun.oss.model.UploadPartRequest;
+import com.aliyun.oss.model.UploadPartResult;
+import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.SequenceInputStream;
 import java.io.UncheckedIOException;
+import java.nio.file.Files;
 import java.util.Arrays;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.stream.Collectors;
 import org.apache.iceberg.aliyun.AliyunProperties;
-import org.apache.iceberg.exceptions.NotFoundException;
 import org.apache.iceberg.io.PositionOutputStream;
 import org.apache.iceberg.relocated.com.google.common.base.Joiner;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.base.Predicates;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.relocated.com.google.common.collect.Maps;
+import org.apache.iceberg.relocated.com.google.common.io.CountingOutputStream;
+import org.apache.iceberg.relocated.com.google.common.util.concurrent.MoreExecutors;
+import org.apache.iceberg.relocated.com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.iceberg.util.Tasks;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class OSSOutputStream extends PositionOutputStream {
+class OSSOutputStream extends PositionOutputStream {
   private static final Logger LOG = LoggerFactory.getLogger(OSSOutputStream.class);
-  private final StackTraceElement[] createStack;
 
+  private static volatile ExecutorService executorService;
+
+  private final StackTraceElement[] createStack;
   private final OSS client;
   private final OSSURI uri;
+  private final AliyunProperties aliyunProperties;
 
-  private final File currentStagingFile;
-  private final OutputStream stream;
+  // For multipart uploading.
+  private final long multiPartSize;
+  private final long multiPartThresholdSize;
+  private final File stagingDirectory;
+  private final List<File> stagingFiles = Lists.newArrayList();
+  private final Map<File, CompletableFuture<UploadPartResult>> multiPartMap = Maps.newHashMap();
+  private String multipartUploadId = null;
+  private File currentStagingFile;
+  private CountingOutputStream stream;
+
   private long pos = 0;
   private boolean closed = false;
 
-  OSSOutputStream(OSS client, OSSURI uri, AliyunProperties aliyunProperties) {
+  OSSOutputStream(OSS client, OSSURI uri, AliyunProperties aliyunProperties) throws IOException {
     this.client = client;
     this.uri = uri;
+    this.aliyunProperties = aliyunProperties;
+
     this.createStack = Thread.currentThread().getStackTrace();
 
-    this.currentStagingFile = newStagingFile(aliyunProperties.ossStagingDirectory());
-    this.stream = newStream(currentStagingFile);
+    this.multiPartSize = aliyunProperties.ossMultiPartSize();
+    this.multiPartThresholdSize = aliyunProperties.ossMultipartThresholdSize();
+    this.stagingDirectory = new File(aliyunProperties.ossStagingDirectory());
+
+    // Initialize the executor service lazily.
+    initializeExecutorService();
+
+    newStream();
   }
 
-  private static File newStagingFile(String ossStagingDirectory) {
-    try {
-      File stagingFile = File.createTempFile("oss-file-io-", ".tmp", new File(ossStagingDirectory));
-      stagingFile.deleteOnExit();
-      return stagingFile;
-    } catch (IOException e) {
-      throw new UncheckedIOException(e);
-    }
-  }
-
-  private static OutputStream newStream(File currentStagingFile) {
-    try {
-      return new BufferedOutputStream(new FileOutputStream(currentStagingFile));
-    } catch (FileNotFoundException e) {
-      throw new NotFoundException(e, "Failed to create file: %s", currentStagingFile);
-    }
-  }
-
-  private static InputStream uncheckedInputStream(File file) {
-    try {
-      return new FileInputStream(file);
-    } catch (IOException e) {
-      throw new UncheckedIOException(e);
+  private void initializeExecutorService() {
+    if (executorService == null) {
+      synchronized (OSSOutputStream.class) {
+        if (executorService == null) {
+          executorService = MoreExecutors.getExitingExecutorService(
+              (ThreadPoolExecutor) Executors.newFixedThreadPool(
+                  aliyunProperties.ossMultipartUploadThreads(),
+                  new ThreadFactoryBuilder()
+                      .setDaemon(true)
+                      .setNameFormat("iceberg-oss-file-io-upload-%d")
+                      .build()));
+        }
+      }
     }
   }
 
@@ -95,21 +127,58 @@ public class OSSOutputStream extends PositionOutputStream {
   @Override
   public void flush() throws IOException {
     Preconditions.checkState(!closed, "Already closed.");
+
     stream.flush();
   }
 
   @Override
   public void write(int b) throws IOException {
     Preconditions.checkState(!closed, "Already closed.");
+
+    if (stream.getCount() >= multiPartSize) {
+      newStream();
+      uploadParts();
+    }
+
     stream.write(b);
     pos += 1;
+
+    // switch to multipart upload
+    if (multipartUploadId == null && pos >= multiPartThresholdSize) {
+      initializeMultiPartUpload();
+      uploadParts();
+    }
   }
 
   @Override
   public void write(byte[] b, int off, int len) throws IOException {
     Preconditions.checkState(!closed, "Already closed.");
-    stream.write(b, off, len);
+
+    int remaining = len;
+    int relativeOffset = off;
+
+    // Write the remainder of the part size to the staging file
+    // and continue to write new staging files if the write is
+    // larger than the part size.
+    while (stream.getCount() + remaining > multiPartSize) {
+      int writeSize = (int) (multiPartSize - stream.getCount());
+
+      stream.write(b, relativeOffset, writeSize);
+      remaining -= writeSize;
+      relativeOffset += writeSize;
+
+      newStream();
+      uploadParts();
+    }
+
+    stream.write(b, relativeOffset, remaining);
     pos += len;
+
+    // switch to multipart upload
+    if (multipartUploadId == null && pos >= multiPartThresholdSize) {
+      initializeMultiPartUpload();
+      uploadParts();
+    }
   }
 
   @Override
@@ -129,25 +198,128 @@ public class OSSOutputStream extends PositionOutputStream {
     }
   }
 
-  private void completeUploads() {
-    long contentLength = currentStagingFile.length();
-    if (contentLength == 0) {
-      LOG.debug("Skipping empty upload to OSS");
+  private void newStream() throws IOException {
+    if (stream != null) {
+      stream.close();
+    }
+
+    currentStagingFile = File.createTempFile("oss-file-io-", ".tmp", stagingDirectory);
+    currentStagingFile.deleteOnExit();
+    stagingFiles.add(currentStagingFile);
+
+    stream = new CountingOutputStream(new BufferedOutputStream(new FileOutputStream(currentStagingFile)));
+  }
+
+  private void initializeMultiPartUpload() {
+    InitiateMultipartUploadRequest request = new InitiateMultipartUploadRequest(uri.bucket(), uri.key());
+    InitiateMultipartUploadResult result = client.initiateMultipartUpload(request);
+    multipartUploadId = result.getUploadId();
+  }
+
+  private void uploadParts() {
+    // exit if multipart has not been initiated
+    if (multipartUploadId == null) {
       return;
     }
 
-    LOG.debug("Uploading {} staged bytes to OSS", contentLength);
-    InputStream contentStream = uncheckedInputStream(currentStagingFile);
-    ObjectMetadata metadata = new ObjectMetadata();
-    metadata.setContentLength(contentLength);
+    stagingFiles.stream()
+        // do not upload the file currently being written
+        .filter(f -> closed || !f.equals(currentStagingFile))
+        // do not upload any files that have already been processed
+        .filter(Predicates.not(multiPartMap::containsKey))
+        .forEach(f -> {
+          UploadPartRequest uploadRequest = new UploadPartRequest(uri.bucket(), uri.key(),
+              multipartUploadId, stagingFiles.indexOf(f) + 1, uncheckedInputStream(f), f.length());
 
-    PutObjectRequest request = new PutObjectRequest(uri.bucket(), uri.key(), contentStream, metadata);
-    client.putObject(request);
+          CompletableFuture<UploadPartResult> future = CompletableFuture.supplyAsync(
+              () -> client.uploadPart(uploadRequest),
+              executorService
+          ).whenComplete((result, thrown) -> {
+            try {
+              Files.deleteIfExists(f.toPath());
+            } catch (IOException e) {
+              LOG.warn("Failed to delete staging file: {}", f, e);
+            }
+
+            if (thrown != null) {
+              LOG.error("Failed to upload part: {}", f, thrown);
+              abortUpload();
+            }
+          });
+
+          multiPartMap.put(f, future);
+        });
+  }
+
+  private void abortUpload() {
+    if (multipartUploadId != null) {
+      try {
+        AbortMultipartUploadRequest request = new AbortMultipartUploadRequest(uri.bucket(), uri.key(),
+            multipartUploadId);
+        client.abortMultipartUpload(request);
+      } finally {
+        cleanUpStagingFiles();
+      }
+    }
   }
 
   private void cleanUpStagingFiles() {
-    if (!currentStagingFile.delete()) {
-      LOG.warn("Failed to delete staging file: {}", currentStagingFile);
+    Tasks.foreach(stagingFiles)
+        .suppressFailureWhenFinished()
+        .onFailure((file, thrown) -> LOG.warn("Failed to delete staging file: {}", file, thrown))
+        .run(File::delete);
+  }
+
+  private void completeUploads() {
+    if (multipartUploadId == null) {
+      long contentLength = stagingFiles.stream().mapToLong(File::length).sum();
+      LOG.debug("Uploading {} staging files to oss, total byte size is: {}", stagingFiles.size(), contentLength);
+
+      InputStream contentStream = new BufferedInputStream(stagingFiles.stream()
+          .map(OSSOutputStream::uncheckedInputStream)
+          .reduce(SequenceInputStream::new)
+          .orElseGet(() -> new ByteArrayInputStream(new byte[0])));
+
+      ObjectMetadata metadata = new ObjectMetadata();
+      metadata.setContentLength(contentLength);
+
+      PutObjectRequest request = new PutObjectRequest(uri.bucket(), uri.key(), contentStream, metadata);
+      client.putObject(request);
+    } else {
+      uploadParts();
+      completeMultiPartUpload();
+    }
+  }
+
+  private void completeMultiPartUpload() {
+    Preconditions.checkState(closed, "Complete upload called on open stream: " + uri);
+
+    List<PartETag> completedPartETags =
+        multiPartMap.values()
+            .stream()
+            .map(CompletableFuture::join)
+            .sorted(Comparator.comparing(UploadPartResult::getPartNumber))
+            .map(UploadPartResult::getPartETag)
+            .collect(Collectors.toList());
+
+    CompleteMultipartUploadRequest request = new CompleteMultipartUploadRequest(uri.bucket(), uri.key(),
+        multipartUploadId, completedPartETags);
+
+    Tasks.foreach(request)
+        .noRetry()
+        .onFailure((r, thrown) -> {
+          LOG.error("Failed to complete multipart upload request: {}", r, thrown);
+          abortUpload();
+        })
+        .throwFailureWhenFinished()
+        .run(client::completeMultipartUpload);
+  }
+
+  private static InputStream uncheckedInputStream(File file) {
+    try {
+      return new FileInputStream(file);
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
     }
   }
 
