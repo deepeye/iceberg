@@ -274,8 +274,8 @@ project(':iceberg-aliyun') {
   dependencies {
     implementation project(path: ':iceberg-bundled-guava', configuration: 'shadow')
     api project(':iceberg-api')
-    implementation project(':iceberg-core')
     implementation project(':iceberg-common')
+    implementation project(':iceberg-core')
 
     compileOnly 'com.aliyun.oss:aliyun-sdk-oss'
     compileOnly 'javax.xml.bind:jaxb-api'
@@ -288,8 +288,8 @@ project(':iceberg-aliyun') {
       exclude group: 'com.google.code.gson', module: 'gson'
     }
 
+
     testImplementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-xml'
-    testImplementation project(path: ':iceberg-api', configuration: 'testArtifacts')
     testImplementation 'org.springframework:spring-web'
     testImplementation('org.springframework.boot:spring-boot-starter-jetty') {
       exclude module: 'logback-classic'
